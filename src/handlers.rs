@@ -1,5 +1,6 @@
 use super::state::AppState;
 use actix_web::{web, HttpResponse};
+use std::convert::TryFrom;
 
 pub async fn health_check_handler(app_state: web::Data<AppState>) -> HttpResponse {
     let health_checker_resp = &app_state.health_checker_response;
@@ -9,129 +10,97 @@ pub async fn health_check_handler(app_state: web::Data<AppState>) -> HttpRespons
     HttpResponse::Ok().json(&resp)
 }
 
+use super::db_access;
 use super::models::Course;
-use chrono::Utc;
 
-pub async fn create_course_handler(
+pub async fn create_course(
     new_course: web::Json<Course>,
     app_state: web::Data<AppState>,
 ) -> HttpResponse {
     println!("received new course");
-    let course_count = app_state
-        .courses
-        .lock()
-        .unwrap()
-        .clone()
-        .into_iter()
-        .filter(|course| course.teacher_id == new_course.teacher_id)
-        .collect::<Vec<Course>>()
-        .len();
-
-    let new_course = Course {
-        id: Some(course_count + 1),
-        name: new_course.name.clone(),
-        teacher_id: new_course.teacher_id,
-        time: Some(Utc::now().naive_utc()),
-    };
-
-    app_state.courses.lock().unwrap().push(new_course);
-    HttpResponse::Ok().json("course created")
+    let course = db_access::create_course(&app_state.db, new_course.into()).await;
+    HttpResponse::Ok().json(course)
 }
 
-pub async fn get_course_for_teacher(
+pub async fn get_courses_for_teacher(
     app_state: web::Data<AppState>,
-    params: web::Path<usize>,
+    params: web::Path<(usize,)>,
 ) -> HttpResponse {
-    let teacher_id = params.0;
-    println!("{}", teacher_id);
-    let filtered_courses = app_state
-        .courses
-        .lock()
-        .unwrap()
-        .clone()
-        .into_iter()
-        .filter(|course| course.teacher_id == teacher_id)
-        .collect::<Vec<Course>>();
-
-    if filtered_courses.len() > 0 {
-        HttpResponse::Ok().json(filtered_courses)
-    } else {
-        HttpResponse::Ok().json("no courses found")
-    }
+    let teacher_id = i32::try_from(params.0).unwrap();
+    let courses = db_access::get_courses(&app_state.db, teacher_id).await;
+    HttpResponse::Ok().json(courses)
 }
 
 pub async fn get_course_detail(
     app_state: web::Data<AppState>,
     params: web::Path<(usize, usize)>,
 ) -> HttpResponse {
-    let (teacher_id, course_id) = params.0;
-    println!("{}, {}", teacher_id, course_id);
-    let selected_courses = app_state
-        .courses
-        .lock()
-        .unwrap()
-        .clone()
-        .into_iter()
-        .find(|course| course.teacher_id == teacher_id && course.id == Some(course_id))
-        .ok_or("course not found");
-
-    if let Ok(course) = selected_courses {
-        HttpResponse::Ok().json(course)
-    } else {
-        HttpResponse::Ok().json("course not found")
-    }
+    let teacher_id = i32::try_from(params.0).unwrap();
+    let course_id = i32::try_from(params.1).unwrap();
+    let course = db_access::get_course_detail(&app_state.db, teacher_id, course_id).await;
+    HttpResponse::Ok().json(course)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::Course;
     use super::*;
-    use actix_web::{http::StatusCode, App};
+    use actix_web::http::StatusCode;
+    use dotenv::dotenv;
+    use sqlx::postgres::PgPoolOptions;
+    use std::env;
     use std::sync::Mutex;
 
     #[actix_rt::test]
-    async fn test_create_course_handler() {
+    async fn test_create_course() {
+        dotenv().ok();
+        let db_url = env::var("DATABASE_URL").expect("DATABASE_URL is not set");
+        let db_pool = PgPoolOptions::new().connect(&db_url).await.unwrap();
+        let share_data = web::Data::new(AppState {
+            health_checker_response: "I'm alive!".to_string(),
+            counter: Mutex::new(0),
+            db: db_pool,
+        });
+
         let course = web::Json(Course {
             id: None,
-            name: "Rust".to_string(),
             teacher_id: 1,
+            name: String::from("unit test"),
             time: None,
         });
-
-        let app_state = web::Data::new(AppState {
-            health_checker_response: "create_course_handler".to_string(),
-            counter: Mutex::new(0),
-            courses: Mutex::new(vec![]),
-        });
-
-        let resp = create_course_handler(course, app_state).await;
+        let resp = create_course(course, share_data).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[actix_rt::test]
-    async fn test_get_course_for_teacher() {
-        let app_state = web::Data::new(AppState {
-            health_checker_response: "create_course_handler".to_string(),
+    async fn test_get_courses_for_teacher() {
+        dotenv().ok();
+        let db_url = env::var("DATABASE_URL").expect("DATABASE_URL is not set");
+        let db_pool = PgPoolOptions::new().connect(&db_url).await.unwrap();
+        let share_data = web::Data::new(AppState {
+            health_checker_response: "I'm alive!".to_string(),
             counter: Mutex::new(0),
-            courses: Mutex::new(vec![]),
+            db: db_pool,
         });
 
-        let params: web::Path<usize> = web::Path::from(1);
-
-        let resp = get_course_for_teacher(app_state, params).await;
+        let params: web::Path<(usize,)> = web::Path::from((1,));
+        let resp = get_courses_for_teacher(share_data, params).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[actix_rt::test]
     async fn test_get_course_detail() {
-        let app_state = web::Data::new(AppState {
-            health_checker_response: "create_course_handler".to_string(),
+        dotenv().ok();
+        let db_url = env::var("DATABASE_URL").expect("DATABASE_URL is not set");
+        let db_pool = PgPoolOptions::new().connect(&db_url).await.unwrap();
+        let share_data = web::Data::new(AppState {
+            health_checker_response: "I'm alive!".to_string(),
             counter: Mutex::new(0),
-            courses: Mutex::new(vec![]),
+            db: db_pool,
         });
 
-        let params: web::Path<(usize, usize)> = web::Path::from((1, 1));
-
-        let resp = get_course_detail(app_state, params).await;
+        let params: web::Path<(usize, usize)> = web::Path::from((1, 3));
+        let resp = get_course_detail(share_data, params).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }
